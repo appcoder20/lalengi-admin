@@ -343,84 +343,63 @@ class VendorController extends Controller
     }
 
     public function update_order_status(Request $request)
-    {
-        $validator = Validator::make($request->all(), [
-            'order_id' => 'required',
-            'reason' =>'required_if:status,canceled',
-            'status' => 'required|in:confirmed,processing,handover,delivered,canceled',
-            'order_proof' =>'array|max:5',
-        ]);
+{
+    $validator = Validator::make($request->all(), [
+        'order_id' => 'required',
+        'reason' =>'required_if:status,canceled',
+        'status' => 'required|in:confirmed,processing,handover,delivered,canceled',
+        'order_proof' =>'array|max:5',
+    ]);
 
-        $validator->sometimes('otp', 'required', function ($request) {
-            return (Config::get('order_delivery_verification')==1 && $request['status']=='delivered');
-        });
+    $validator->sometimes('otp', 'required', function ($request) {
+        return (Config::get('order_delivery_verification')==1 && $request['status']=='delivered');
+    });
 
-        if ($validator->fails()) {
-            return response()->json(['errors' => Helpers::error_processor($validator)], 403);
-        }
+    if ($validator->fails()) {
+        return response()->json(['errors' => Helpers::error_processor($validator)], 403);
+    }
 
+    DB::beginTransaction();
+    try {
         $vendor = $request['vendor'];
 
         $order = Order::whereHas('store.vendor', function($query) use($vendor){
             $query->where('id', $vendor->id);
-        })
-        ->where('id', $request['order_id'])
-        ->Notpos()
-        ->first();
+        })->where('id', $request['order_id'])->lockForUpdate()->Notpos()->first();
 
-        if($request['order_status']=='canceled')
-        {
-            if(!config('canceled_by_store'))
-            {
-                return response()->json([
-                    'errors' => [
-                        ['code' => 'status', 'message' => translate('messages.you_can_not_cancel_a_order')]
-                    ]
-                ], 403);
-            }
-            else if($order->confirmed)
-            {
-                return response()->json([
-                    'errors' => [
-                        ['code' => 'status', 'message' => translate('messages.you_can_not_cancel_after_confirm')]
-                    ]
-                ], 403);
+        if (!$order) {
+            DB::rollBack();
+            return response()->json(['errors' => [['code' => 'order', 'message' => translate('messages.order_not_found')]]], 404);
+        }
+
+        if($request['order_status']=='canceled') {
+            if(!config('canceled_by_store')) {
+                DB::rollBack();
+                return response()->json(['errors' => [['code' => 'status', 'message' => translate('messages.you_can_not_cancel_a_order')]]], 403);
+            } else if($order->confirmed) {
+                DB::rollBack();
+                return response()->json(['errors' => [['code' => 'status', 'message' => translate('messages.you_can_not_cancel_after_confirm')]]], 403);
             }
         }
 
-        if($request['status'] =="confirmed" && !$vendor->stores[0]->sub_self_delivery && config('order_confirmation_model') == 'deliveryman' && $order->order_type != 'take_away')
-        {
-            return response()->json([
-                'errors' => [
-                    ['code' => 'order-confirmation-model', 'message' => translate('messages.order_confirmation_warning')]
-                ]
-            ], 403);
+        if($request['status'] =="confirmed" && !$vendor->stores[0]->sub_self_delivery && config('order_confirmation_model') == 'deliveryman' && $order->order_type != 'take_away') {
+            DB::rollBack();
+            return response()->json(['errors' => [['code' => 'order-confirmation-model', 'message' => translate('messages.order_confirmation_warning')]]], 403);
         }
 
-        if($order->picked_up != null)
-        {
-            return response()->json([
-                'errors' => [
-                    ['code' => 'status', 'message' => translate('messages.You_can_not_change_status_after_picked_up_by_delivery_man')]
-                ]
-            ], 403);
+        if($order->picked_up != null) {
+            DB::rollBack();
+            return response()->json(['errors' => [['code' => 'status', 'message' => translate('messages.You_can_not_change_status_after_picked_up_by_delivery_man')]]], 403);
         }
 
-        if($request['status']=='delivered' && $order->order_type != 'take_away' && !$vendor->stores[0]->sub_self_delivery)
-        {
-            return response()->json([
-                'errors' => [
-                    ['code' => 'status', 'message' => translate('messages.you_can_not_delivered_delivery_order')]
-                ]
-            ], 403);
+        if($request['status']=='delivered' && $order->order_type != 'take_away' && !$vendor->stores[0]->sub_self_delivery) {
+            DB::rollBack();
+            return response()->json(['errors' => [['code' => 'status', 'message' => translate('messages.you_can_not_delivered_delivery_order')]]], 403);
         }
-        if(Config::get('order_delivery_verification')==1 && $request['status']=='delivered' && $order->otp != $request['otp'])
-        {
-            return response()->json([
-                'errors' => [
-                    ['code' => 'otp', 'message' => 'Not matched']
-                ]
-            ], 403);
+
+        if(Config::get('order_delivery_verification')==1 && $request['status']=='delivered' && $order->otp != $request['otp']) {
+            DB::rollBack();
+            return response()->json(['errors' => [['code' => 'otp', 'message' => 'Not matched']]], 403);
         }
 
         if ($request->status == 'delivered' && $order->transaction == null) {
@@ -429,12 +408,9 @@ class VendorController extends Controller
             if($unpaid_payment){
                 $unpaid_pay_method = $unpaid_payment;
             }
-            if($order->payment_method == 'cash_on_delivery' || $unpaid_pay_method == 'cash_on_delivery')
-            {
+            if($order->payment_method == 'cash_on_delivery' || $unpaid_pay_method == 'cash_on_delivery') {
                 $ol = OrderLogic::create_transaction($order,'store', null);
-            }
-            else
-            {
+            } else {
                 $ol = OrderLogic::create_transaction($order,'admin', null);
             }
 
@@ -442,11 +418,9 @@ class VendorController extends Controller
             OrderLogic::update_unpaid_order_payment(order_id:$order->id, payment_method:$order->payment_method);
         }
 
-        if($request->status == 'delivered')
-        {
+        if($request->status == 'delivered') {
             $order->details->each(function($item, $key){
-                if($item->item)
-                {
+                if($item->item) {
                     $item->item->increment('order_count');
                 }
             });
@@ -455,7 +429,6 @@ class VendorController extends Controller
                 $order->customer->increment('order_count');
             }
             $order?->store?->increment('order_count');
-
 
             $img_names = [];
             $images = [];
@@ -471,13 +444,10 @@ class VendorController extends Controller
                 $order->order_proof = json_encode($images);
             }
         }
-        if($request->status == 'canceled' || $request->status == 'delivered')
-        {
-            if($order->delivery_man)
-            {
-                $dm = $order->delivery_man;
-                $dm->current_orders = $dm->current_orders>1?$dm->current_orders-1:0;
-                $dm->save();
+
+        if($request->status == 'canceled' || $request->status == 'delivered') {
+            if($order->delivery_man_id) {
+                DeliveryMan::where('id', $order->delivery_man_id)->where('current_orders', '>', 0)->decrement('current_orders');
             }
             $order->cancellation_reason=$request->reason;
             $order->canceled_by='store';
@@ -489,10 +459,19 @@ class VendorController extends Controller
         }
         $order[$request['status']] = now();
         $order->save();
+
+        DB::commit();
+
         Helpers::send_order_notification($order);
 
         return response()->json(['message' => 'Status updated'], 200);
+
+    } catch (\Exception $e) {
+        DB::rollBack();
+        info('Error in vendor update_order_status: ' . $e->getMessage());
+        return response()->json(['errors' => [['code' => 'error', 'message' => translate('messages.something_went_wrong')]]], 500);
     }
+}
 
     public function get_order_details(Request $request)
     {
@@ -987,6 +966,13 @@ class VendorController extends Controller
             $free_delivery_over = BusinessSetting::where('key', 'free_delivery_over')->first()->value;
             if (isset($free_delivery_over)) {
                 if ($free_delivery_over <= $product_price + $total_addon_price - $coupon_discount_amount - $store_discount_amount) {
+                    $order->delivery_charge = 0;
+                    $free_delivery_by = 'admin';
+                }
+            }
+
+            if ($store->store_free_delivery && isset($store->store_free_delivery_over)) {
+                if ($store->store_free_delivery_over <= $product_price + $total_addon_price - $coupon_discount_amount - $store_discount_amount) {
                     $order->delivery_charge = 0;
                     $free_delivery_by = 'admin';
                 }

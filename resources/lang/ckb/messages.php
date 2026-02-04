@@ -7553,4 +7553,7 @@ Smartly or Earn. ',
   'cannot_change_status_after_delivered' => 'Cannot change status after delivered',
   'Store is inactive' => 'Store is inactive',
   'Customer Not found!' => 'Customer Not found!',
+  'store_free_delivery_hint' => 'Store free delivery hint',
+  'customer_not_found' => 'Customer not found',
+  'This_mail_turned_off_by_admin' => 'This mail turned off by admin',
 );

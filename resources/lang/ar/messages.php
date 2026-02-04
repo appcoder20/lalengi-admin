@@ -5518,4 +5518,9 @@
   'invalid_customer_data' => 'Invalid customer data',
   'deliveryman_not_found' => 'Deliveryman not found',
   'confirm_this_order_?' => 'Confirm this order ?',
+  'The guest id field is required.' => 'The guest id field is required.',
+  'most popular' => 'Most popular',
+  'assign_delivery_man_manually' => 'Assign delivery man manually',
+  'Proceed,_If_thermal_printer_is_ready.' => 'Proceed, If thermal printer is ready.',
+  'message_from' => 'Message from',
 );

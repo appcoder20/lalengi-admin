@@ -147,6 +147,75 @@
                             </div>
                         </div>
                         @endif
+                        {{-- Free delivery switch --}}
+                            <div class="col-sm-6 col-lg-4">
+                                <div class="form-group mb-0">
+                                    <label
+                                        class="toggle-switch toggle-switch-sm d-flex justify-content-between border border-secondary rounded px-4 form-control"
+                                        for="store_free_delivery">
+                                        <span class="pr-2 text-capitalize">
+                                            {{ translate('messages.store_free_delivery') }}
+                                            <span class="input-label-secondary" data-toggle="tooltip"
+                                                data-placement="right"
+                                                data-original-title="{{ translate('When_enabled,_customers_will_get_store_free_delivery_from_this_store.') }}">
+                                                <img src="{{ asset('/public/assets/admin/img/info-circle.svg') }}"
+                                                    alt="{{ translate('messages.store_free_delivery_hint') }}">
+                                            </span>
+                                        </span>
+                                        <input type="checkbox" class="toggle-switch-input redirect-url"
+                                            data-url="{{ route('admin.store.toggle-settings', [$store->id, $store->store_free_delivery ? 0 : 1, 'store_free_delivery']) }}"
+                                            id="store_free_delivery" {{ $store->store_free_delivery ? 'checked' : '' }}>
+                                        <span class="toggle-switch-label">
+                                            <span class="toggle-switch-indicator"></span>
+                                        </span>
+                                    </label>
+                                </div>
+                            </div>
+
+                            {{-- Store free delivery over --}}
+                            <div id="show_store_free_delivery_over" class="col-sm-6 col-lg-6">
+                                <div class="form-group mb-0">
+                                    <label
+                                        class="form-label d-flex justify-content-between text-capitalize mb-1 add_text_mute"
+                                        for="store_free_delivery_over">
+                                        <span class="line--limit-1">
+                                            {{ translate('messages.store_free_delivery_over') }}
+                                            ({{ \App\CentralLogics\Helpers::currency_symbol() }})
+                                            <small class="text-danger">
+                                                <span class="form-label-secondary" data-toggle="tooltip"
+                                                    data-placement="right"
+                                                    data-original-title="{{ translate('messages.Set_a_minimum_order_value_for_store_free_delivery._If_the_minimum_amount_is_exceeded,_delivery_fee_is_deducted_from_Admin’s_commission.') }}">
+                                                    <img src="{{ asset('/public/assets/admin/img/info-circle.svg') }}"
+                                                        alt="{{ translate('messages.store_free_delivery_over_hint') }}">
+                                                </span> *
+                                            </small>
+                                        </span>
+                                    </label>
+
+                                    <input type="number" name="store_free_delivery_over" class="form-control"
+                                        id="store_free_delivery_over" placeholder="{{ translate('messages.Ex:_10') }}"
+                                        value="{{ $store->store_free_delivery_over ?? 1 }}" min="0"
+                                        step=".01" {{ $store->store_free_delivery ? '' : 'readonly' }}>
+                                </div>
+                            </div>
+
+                            {{-- JS Control --}}
+                            <script>
+                                $(document).ready(function() {
+                                    $('#store_free_delivery').on('change', function() {
+                                        if ($(this).is(':checked')) {
+                                            $('#store_free_delivery_over')
+                                                .prop('readonly', false)
+                                                .val(1);
+                                        } else {
+                                            $('#store_free_delivery_over')
+                                                .prop('readonly', true)
+                                                .val(0);
+                                        }
+                                    });
+                                });
+                            </script>
+                            
                         @if ($store->module->module_type == 'pharmacy')
                         @php($prescription_order_status = \App\Models\BusinessSetting::where('key', 'prescription_order_status')->first())
                         @php($prescription_order_status = $prescription_order_status ? $prescription_order_status->value : 0)

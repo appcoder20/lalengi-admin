@@ -241,42 +241,36 @@ class DeliverymanController extends Controller
     }
 
     public function accept_order(Request $request)
-    {
-        $validator = Validator::make($request->all(), [
-            'order_id' => 'required|exists:orders,id',
-        ]);
-        if ($validator->fails()) {
-            return response()->json(['errors' => Helpers::error_processor($validator)], 403);
+{
+    $validator = Validator::make($request->all(), [
+        'order_id' => 'required|exists:orders,id',
+    ]);
+    if ($validator->fails()) {
+        return response()->json(['errors' => Helpers::error_processor($validator)], 403);
+    }
+
+    DB::beginTransaction();
+    try {
+        $dm = DeliveryMan::where(['auth_token' => $request['token']])->lockForUpdate()->first();
+        
+        if (!$dm) {
+            DB::rollBack();
+            return response()->json(['errors' => [['code' => 'auth', 'message' => translate('messages.unauthorized')]]], 401);
         }
-        $dm=DeliveryMan::where(['auth_token' => $request['token']])->first();
-        $order = Order::where('id', $request['order_id'])
-        // ->whereIn('order_status', ['pending', 'confirmed'])
-        ->whereNull('delivery_man_id')
-        ->dmOrder()
-        ->first();
-        if(!$order)
-        {
-            return response()->json([
-                'errors' => [
-                    ['code' => 'order', 'message' => translate('messages.can_not_accept')]
-                ]
-            ], 404);
+
+        $order = Order::where('id', $request['order_id'])->whereNull('delivery_man_id')->lockForUpdate()->dmOrder()->first();
+        
+        if(!$order) {
+            DB::rollBack();
+            return response()->json(['errors' => [['code' => 'order', 'message' => translate('messages.can_not_accept')]]], 404);
         }
-        if($dm->active != 1)
-        {
-            return response()->json([
-                'errors' => [
-                    ['code' => 'active_status', 'message' => translate('messages.You_can_not_accept_order_on_offline')]
-                ]
-            ], 404);
+        if($dm->active != 1) {
+            DB::rollBack();
+            return response()->json(['errors' => [['code' => 'active_status', 'message' => translate('messages.You_can_not_accept_order_on_offline')]]], 404);
         }
-        if($dm->current_orders >= config('dm_maximum_orders'))
-        {
-            return response()->json([
-                'errors'=>[
-                    ['code' => 'dm_maximum_order_exceed', 'message'=> translate('messages.dm_maximum_order_exceed_warning')]
-                ]
-            ], 405);
+        if($dm->current_orders >= config('dm_maximum_orders')) {
+            DB::rollBack();
+            return response()->json(['errors'=>[['code' => 'dm_maximum_order_exceed', 'message'=> translate('messages.dm_maximum_order_exceed_warning')]]], 405);
         }
 
         $payments = $order->payments()->where('payment_method','cash_on_delivery')->exists();
@@ -284,24 +278,16 @@ class DeliverymanController extends Controller
         $dm_max_cash=BusinessSetting::where('key','dm_max_cash_in_hand')->first();
         $value=  $dm_max_cash?->value ?? 0;
 
-
         if(($order->payment_method == "cash_on_delivery" || $payments) && (($cash_in_hand+$order->order_amount) >= $value)){
-
-            return response()->json([
-                'errors'=>[
-                    ['code' => 'dm_maximum_hand_in_cash', 'message'=> \App\CentralLogics\Helpers::format_currency($value) ." ".translate('max_cash_in_hand_exceeds') ]
-                ]
-            ], 405);
+            DB::rollBack();
+            return response()->json(['errors'=>[['code' => 'dm_maximum_hand_in_cash', 'message'=> \App\CentralLogics\Helpers::format_currency($value) ." ".translate('max_cash_in_hand_exceeds') ]]], 405);
         }
 
-
-        if($order->order_type == 'parcel' && $order->order_status=='confirmed')
-        {
+        if($order->order_type == 'parcel' && $order->order_status=='confirmed') {
             $order->order_status = 'handover';
             $order->handover = now();
             $order->processing = now();
-        }
-        else{
+        } else {
             $order->order_status = in_array($order->order_status, ['pending', 'confirmed'])?'accepted':$order->order_status;
         }
 
@@ -309,19 +295,16 @@ class DeliverymanController extends Controller
         $order->accepted = now();
         $order->save();
 
-        $dm->current_orders = $dm->current_orders+1;
-        $dm->save();
-
+        $dm->increment('current_orders');
         $dm->increment('assigned_order_count');
 
+        DB::commit();
+
         $fcm_token= $order->is_guest == 0 ? $order?->customer?->cm_firebase_token : $order?->guest?->fcm_token;
-
-
         $value = Helpers::order_status_update_message('accepted',$order->module->module_type);
         $value = Helpers::text_variable_data_format(value:$value,store_name:$order->store?->name,order_id:$order->id,user_name:"{$order?->customer?->f_name} {$order?->customer?->l_name}",delivery_man_name:"{$order->delivery_man?->f_name} {$order->delivery_man?->l_name}");
         try {
-            if($value && $fcm_token && Helpers::getNotificationStatusData('customer','customer_order_notification','push_notification_status'))
-            {
+            if($value && $fcm_token && Helpers::getNotificationStatusData('customer','customer_order_notification','push_notification_status')) {
                 $data = [
                     'title' =>translate('Order_Notification'),
                     'description' => $value,
@@ -330,15 +313,22 @@ class DeliverymanController extends Controller
                     'type'=> 'order_status'
                 ];
                 Helpers::send_push_notif_to_device($fcm_token, $data);
+                if ($order->is_guest == 0 && $order->customer) {
+                    DB::table('user_notifications')->insert(['data' => json_encode($data), 'user_id' => $order->customer->id, 'created_at' => now(), 'updated_at' => now()]);
+                }
             }
-
         } catch (\Exception $e) {
-
+            info('Notification failed in accept_order: ' . $e->getMessage());
         }
 
         return response()->json(['message' => 'Order accepted successfully'], 200);
 
+    } catch (\Exception $e) {
+        DB::rollBack();
+        info('Error in accept_order: ' . $e->getMessage());
+        return response()->json(['errors' => [['code' => 'error', 'message' => translate('messages.something_went_wrong')]]], 500);
     }
+}
 
     public function record_location_data(Request $request)
     {
@@ -426,82 +416,66 @@ class DeliverymanController extends Controller
         return response()->json([], 200);
     }
 
-    public function update_order_status(Request $request)
-    {
-        $validator = Validator::make($request->all(), [
-            'order_id' => 'required',
-            'status' => 'required|in:confirmed,canceled,picked_up,delivered,handover',
-            'reason' =>'required_if:status,canceled',
-            'order_proof' =>'array|max:5',
-        ]);
+   public function update_order_status(Request $request)
+{
+    $validator = Validator::make($request->all(), [
+        'order_id' => 'required',
+        'status' => 'required|in:confirmed,canceled,picked_up,delivered,handover',
+        'reason' =>'required_if:status,canceled',
+        'order_proof' =>'array|max:5',
+    ]);
 
-        $validator->sometimes('otp', 'required', function ($request) {
-            return (Config::get('order_delivery_verification')==1 && $request['status']=='delivered');
-        });
+    $validator->sometimes('otp', 'required', function ($request) {
+        return (Config::get('order_delivery_verification')==1 && $request['status']=='delivered');
+    });
 
-        if ($validator->fails()) {
-            return response()->json(['errors' => Helpers::error_processor($validator)], 403);
+    if ($validator->fails()) {
+        return response()->json(['errors' => Helpers::error_processor($validator)], 403);
+    }
+
+    DB::beginTransaction();
+    try {
+        $dm = DeliveryMan::where(['auth_token' => $request['token']])->lockForUpdate()->first();
+
+        if (!$dm) {
+            DB::rollBack();
+            return response()->json(['errors' => [['code' => 'auth', 'message' => translate('messages.unauthorized')]]], 401);
         }
-        $dm = DeliveryMan::where(['auth_token' => $request['token']])->first();
 
-        $order = Order::where(['id' => $request['order_id'], 'delivery_man_id' => $dm['id']])->dmOrder()->first();
+        $order = Order::where(['id' => $request['order_id'], 'delivery_man_id' => $dm['id']])->lockForUpdate()->dmOrder()->first();
 
         if(!$order || (!$order->store && $order->order_type !='parcel') ){
-            return response()->json([
-                'errors' => [
-                    ['code' => 'not_found', 'message' => translate('messages.you_can_not_change_the_status_of_this_order')]
-                ]
-            ], 403);
+            DB::rollBack();
+            return response()->json(['errors' => [['code' => 'not_found', 'message' => translate('messages.you_can_not_change_the_status_of_this_order')]]], 403);
         }
 
-        if($request['status'] =="confirmed" && config('order_confirmation_model') == 'store')
-        {
-            return response()->json([
-                'errors' => [
-                    ['code' => 'order-confirmation-model', 'message' => translate('messages.order_confirmation_warning')]
-                ]
-            ], 403);
+        if($request['status'] =="confirmed" && config('order_confirmation_model') == 'store') {
+            DB::rollBack();
+            return response()->json(['errors' => [['code' => 'order-confirmation-model', 'message' => translate('messages.order_confirmation_warning')]]], 403);
         }
 
-        if($request['status'] == 'canceled' && !config('canceled_by_deliveryman'))
-        {
-            return response()->json([
-                'errors' => [
-                    ['code' => 'status', 'message' => translate('messages.you_can_not_cancel_a_order')]
-                ]
-            ], 403);
+        if($request['status'] == 'canceled' && !config('canceled_by_deliveryman')) {
+            DB::rollBack();
+            return response()->json(['errors' => [['code' => 'status', 'message' => translate('messages.you_can_not_cancel_a_order')]]], 403);
         }
 
-        if($order->confirmed && $request['status'] == 'canceled')
-        {
-            return response()->json([
-                'errors' => [
-                    ['code' => 'delivery-man', 'message' => translate('messages.order_can_not_cancle_after_confirm')]
-                ]
-            ], 403);
+        if($order->confirmed && $request['status'] == 'canceled') {
+            DB::rollBack();
+            return response()->json(['errors' => [['code' => 'delivery-man', 'message' => translate('messages.order_can_not_cancle_after_confirm')]]], 403);
         }
 
-        if(Config::get('order_delivery_verification')==1  && $order->charge_payer=='sender' && $request['status']=='picked_up' && $order->otp != $request['otp'])
-        {
-            return response()->json([
-                'errors' => [
-                    ['code' => 'otp', 'message' => translate('Not matched')]
-                ]
-            ], 406);
+        if(Config::get('order_delivery_verification')==1  && $order->charge_payer=='sender' && $request['status']=='picked_up' && $order->otp != $request['otp']) {
+            DB::rollBack();
+            return response()->json(['errors' => [['code' => 'otp', 'message' => translate('Not matched')]]], 406);
         }
 
-        if(Config::get('order_delivery_verification')==1 &&  $request['status']=='delivered' && $order->otp != $request['otp'])
-        {
-            return response()->json([
-                'errors' => [
-                    ['code' => 'otp', 'message' => translate('Otp Not matched')]
-                ]
-            ], 406);
+        if(Config::get('order_delivery_verification')==1 &&  $request['status']=='delivered' && $order->otp != $request['otp']) {
+            DB::rollBack();
+            return response()->json(['errors' => [['code' => 'otp', 'message' => translate('Otp Not matched')]]], 406);
         }
-        if ($request->status == 'delivered')
-        {
-            if($order->transaction == null)
-            {
+
+        if ($request->status == 'delivered') {
+            if($order->transaction == null) {
                 $unpaid_payment = OrderPayment::where('payment_status','unpaid')->where('order_id',$order->id)->first();
                 $pay_method = 'digital_payment';
                 if($unpaid_payment && $unpaid_payment->payment_method == 'cash_on_delivery'){
@@ -509,42 +483,31 @@ class DeliverymanController extends Controller
                 }
                 $reveived_by = ($order->payment_method == 'cash_on_delivery' || $pay_method == 'cash_on_delivery')?($dm->type != 'zone_wise'?'store':'deliveryman'):'admin';
 
-                if(OrderLogic::create_transaction($order,$reveived_by, null))
-                {
+                if(OrderLogic::create_transaction($order,$reveived_by, null)) {
                     $order->payment_status = 'paid';
-                }
-                else
-                {
-                    return response()->json([
-                        'errors' => [
-                            ['code' => 'error', 'message' => translate('messages.faield_to_create_order_transaction')]
-                        ]
-                    ], 406);
+                } else {
+                    DB::rollBack();
+                    return response()->json(['errors' => [['code' => 'error', 'message' => translate('messages.faield_to_create_order_transaction')]]], 406);
                 }
             }
-            if($order->transaction)
-            {
+            if($order->transaction) {
                 $order->transaction->update(['delivery_man_id'=>$dm->id]);
             }
 
             $order->details->each(function($item, $key){
-                if($item->food)
-                {
+                if($item->food) {
                     $item->food->increment('order_count');
                 }
             });
             $order?->customer?->increment('order_count');
 
-            $dm->current_orders = $dm->current_orders>1?$dm->current_orders-1:0;
-            $dm->save();
-
+            DeliveryMan::where('id', $dm->id)->where('current_orders', '>', 0)->decrement('current_orders');
             $dm->increment('order_count');
-            if($order->store)
-            {
+
+            if($order->store) {
                 $order->store->increment('order_count');
             }
-            if($order->parcel_category)
-            {
+            if($order->parcel_category) {
                 $order->parcel_category->increment('orders_count');
             }
 
@@ -563,20 +526,13 @@ class DeliverymanController extends Controller
 
             OrderLogic::update_unpaid_order_payment(order_id:$order->id, payment_method:$order->payment_method);
 
-        }
-        else if($request->status == 'canceled')
-        {
-            if($order->delivery_man)
-            {
-                $dm = $order->delivery_man;
-                $dm->current_orders = $dm->current_orders>1?$dm->current_orders-1:0;
-                $dm->save();
+        } else if($request->status == 'canceled') {
+            if($order->delivery_man_id) {
+                DeliveryMan::where('id', $order->delivery_man_id)->where('current_orders', '>', 0)->decrement('current_orders');
             }
             $order->cancellation_reason = $request->reason;
             $order->canceled_by = 'deliveryman';
-        }
-        else if($order->order_type == 'parcel' && $request->status == 'handover')
-        {
+        } else if($order->order_type == 'parcel' && $request->status == 'handover') {
             $order->confirmed = now();
             $order->processing = now();
         }
@@ -585,10 +541,18 @@ class DeliverymanController extends Controller
         $order[$request['status']] = now();
         $order->save();
 
+        DB::commit();
+
         Helpers::send_order_notification($order);
 
         return response()->json(['message' =>  translate('Status updated')], 200);
+
+    } catch (\Exception $e) {
+        DB::rollBack();
+        info('Error in update_order_status: ' . $e->getMessage());
+        return response()->json(['errors' => [['code' => 'error', 'message' => translate('messages.something_went_wrong')]]], 500);
     }
+}
 
     public function get_order_details(Request $request)
     {

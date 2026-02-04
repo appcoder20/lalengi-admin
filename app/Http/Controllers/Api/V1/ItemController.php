@@ -30,8 +30,6 @@ class ItemController extends Controller
         $validator = Validator::make($request->all(), [
             'store_id' => 'required',
             'category_id' => 'required',
-            'limit' => 'required',
-            'offset' => 'required',
         ]);
 
         if ($validator->fails()) {
@@ -51,7 +49,11 @@ class ItemController extends Controller
         $min = $request->query('min_price');
         $max = $request->query('max_price');
 
-        $items = ProductLogic::get_latest_products($zone_id, $request['limit'], $request['offset'], $request['store_id'], $request['category_id'], $type,$min,$max,$product_id);
+        $limit = $request->has('limit') ? $request->limit : null;
+        $offset = $request->has('offset') ? $request->offset : null;
+
+
+        $items = ProductLogic::get_latest_products($zone_id, $limit, $offset, $request['store_id'], $request['category_id'], $type,$min,$max,$product_id);
         $items['categories'] = $items['categories'];
         $items['products'] = Helpers::product_data_formatting($items['products'], true, false, app()->getLocale());
         return response()->json($items, 200);

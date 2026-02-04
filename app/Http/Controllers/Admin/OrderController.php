@@ -363,39 +363,46 @@ class OrderController extends Controller
     }
 
     public function status(Request $request)
-    {
-        $request->validate([
-            'reason'=>'required_if:order_status,canceled'
-        ]);
+{
+    $request->validate([
+        'reason'=>'required_if:order_status,canceled'
+    ]);
 
+    DB::beginTransaction();
+    try {
         $order = Order::with(['details', 'store' => function ($query) {
             return $query->withCount('orders');
         }, 'details.item' => function ($query) {
             return $query->withoutGlobalScope(StoreScope::class);
         }, 'details.campaign' => function ($query) {
             return $query->withoutGlobalScope(StoreScope::class);
-        }])->withOutGlobalScope(ZoneScope::class)->find($request->id);
+        }])->withOutGlobalScope(ZoneScope::class)->lockForUpdate()->find($request->id);
 
         if(!$order || (!$order->store && $order->order_type !='parcel') ){
+            DB::rollBack();
             Toastr::warning(translate('messages.you_can_not_change_the_status_of_this_order'));
             return back();
         }
 
         if (in_array($order->order_status, ['refunded', 'failed'])) {
+            DB::rollBack();
             Toastr::warning(translate('messages.you_can_not_change_the_status_of_a_completed_order'));
             return back();
         }
         if (in_array($order->order_status, ['refund_requested']) && BusinessSetting::where(['key' => 'refund_active_status'])->first()->value == false) {
+            DB::rollBack();
             Toastr::warning(translate('Refund Option is not active. Please active it from Refund Settings'));
             return back();
         }
 
         if ($order['delivery_man_id'] == null && $request->order_status == 'out_for_delivery') {
+            DB::rollBack();
             Toastr::warning(translate('messages.please_assign_deliveryman_first'));
             return back();
         }
 
         if ($request->order_status == 'delivered' && $order['transaction_reference'] == null && $order['payment_method'] != 'cash_on_delivery') {
+            DB::rollBack();
             Toastr::warning(translate('messages.add_your_paymen_ref_first'));
             return back();
         }
@@ -420,6 +427,7 @@ class OrderController extends Controller
                     $ol = OrderLogic::create_transaction($order, 'admin', null);
                 }
                 if (!$ol) {
+                    DB::rollBack();
                     Toastr::warning(translate('messages.faield_to_create_order_transaction'));
                     return back();
                 }
@@ -428,11 +436,9 @@ class OrderController extends Controller
             }
 
             $order->payment_status = 'paid';
-            if ($order->delivery_man) {
-                $dm = $order->delivery_man;
-                $dm->increment('order_count');
-                $dm->current_orders = $dm->current_orders > 1 ? $dm->current_orders - 1 : 0;
-                $dm->save();
+            if ($order->delivery_man_id) {
+                DeliveryMan::where('id', $order->delivery_man_id)->increment('order_count');
+                DeliveryMan::where('id', $order->delivery_man_id)->where('current_orders', '>', 0)->decrement('current_orders');
             }
             $order->details->each(function ($item, $key) {
                 if ($item->item) {
@@ -451,12 +457,14 @@ class OrderController extends Controller
 
         } else if ($request->order_status == 'refunded' && BusinessSetting::where('key', 'refund_active_status')->first()->value == 1) {
             if ($order->payment_status == "unpaid") {
+                DB::rollBack();
                 Toastr::warning(translate('messages.you_can_not_refund_a_cod_order'));
                 return back();
             }
             if (isset($order->delivered)) {
                 $rt = OrderLogic::refund_order($order);
                 if (!$rt) {
+                    DB::rollBack();
                     Toastr::warning(translate('messages.faield_to_create_order_transaction'));
                     return back();
                 }
@@ -481,15 +489,11 @@ class OrderController extends Controller
             ]);
             $order?->store ?   Helpers::increment_order_count($order?->store) : '';
 
-            if ($order->delivery_man) {
-                $dm = $order->delivery_man;
-                $dm->current_orders = $dm->current_orders > 1 ? $dm->current_orders - 1 : 0;
-                $dm->save();
+            if ($order->delivery_man_id) {
+                DeliveryMan::where('id', $order->delivery_man_id)->where('current_orders', '>', 0)->decrement('current_orders');
             }
 
             try {
-
-
                 if(Helpers::getNotificationStatusData('customer','customer_refund_request_approval','push_notification_status') && $order?->customer?->cm_firebase_token){
                     $data = [
                         'title' => translate('messages.order_refunded'),
@@ -508,8 +512,6 @@ class OrderController extends Controller
                     ]);
                 }
 
-
-
                 if(config('mail.status') && $order?->customer?->email && Helpers::get_mail_status('refund_order_mail_status_user') == '1'  &&  Helpers::getNotificationStatusData('customer','customer_refund_request_approval','mail_status') ){
                     Mail::to($order->customer->email)->send(new \App\Mail\RefundedOrderMail($order->id));
                 }
@@ -519,6 +521,7 @@ class OrderController extends Controller
             }
         } else if ($request->order_status == 'canceled') {
             if (in_array($order->order_status, ['delivered', 'canceled', 'refund_requested', 'refunded', 'failed'])) {
+                DB::rollBack();
                 Toastr::warning(translate('messages.you_can_not_cancel_a_completed_order'));
                 return back();
             }
@@ -537,13 +540,10 @@ class OrderController extends Controller
                     ProductLogic::update_stock($item, -$detail->quantity, count($variant) ? $variant[0]['type'] : null)->save();
                 }
             }
-            if ($order->delivery_man) {
-                $dm = $order->delivery_man;
-                $dm->current_orders = $dm->current_orders > 1 ? $dm->current_orders - 1 : 0;
-                $dm->save();
+            if ($order->delivery_man_id) {
+                DeliveryMan::where('id', $order->delivery_man_id)->where('current_orders', '>', 0)->decrement('current_orders');
             }
             if($order->is_guest == 0){
-
                 OrderLogic::refund_before_delivered($order);
             }
         }
@@ -554,44 +554,88 @@ class OrderController extends Controller
         $order[$request->order_status] = now();
         $order->save();
 
+        DB::commit();
+
         if (!Helpers::send_order_notification($order)) {
             Toastr::warning(translate('messages.push_notification_faild'));
         }
 
         Toastr::success(translate('messages.order_status_updated'));
         return back();
+
+    } catch (\Exception $e) {
+        DB::rollBack();
+        info('Error in status update: ' . $e->getMessage());
+        Toastr::error(translate('messages.something_went_wrong'));
+        return back();
     }
+}
 
     public function add_delivery_man($order_id, $delivery_man_id)
-    {
-        if ($delivery_man_id == 0) {
+{
+    if ($delivery_man_id == 0) {
             return response()->json(['message'=> translate('messages.deliveryman_not_found')  ], 400);
-        }
-        $order = Order::withOutGlobalScope(ZoneScope::class)->find($order_id);
+    }
 
-        $deliveryman = DeliveryMan::where('id', $delivery_man_id)->available()->active()->first();
+    DB::beginTransaction();
+    try {
+        // Lock order and delivery man records to prevent race conditions
+        $order = Order::withOutGlobalScope(ZoneScope::class)->lockForUpdate()->find($order_id);
+
+        if (!$order) {
+            DB::rollBack();
+            return response()->json(['message'=> translate('messages.order_not_found')], 404);
+        }
+
+        $deliveryman = DeliveryMan::where('id', $delivery_man_id)
+            ->available()
+            ->active()
+            ->lockForUpdate()
+            ->first();
+
+        if (!$deliveryman) {
+            DB::rollBack();
+            return response()->json(['message' => translate('messages.deliveryman_not_available')], 400);
+        }
+
+        // Check if order is already assigned to this delivery man
         if ($order->delivery_man_id == $delivery_man_id) {
-            return response()->json(['message'=> translate('messages.order_already_assign_to_this_deliveryman')  ], 400);
+            DB::rollBack();
+            return response()->json(['message'=> translate('messages.order_already_assign_to_this_deliveryman')], 400);
         }
-        if ($deliveryman) {
-            if ($deliveryman->current_orders >= config('dm_maximum_orders')) {
-                return response()->json(['message'=> translate('messages.dm_maximum_order_exceed_warning')  ], 400);
-            }
 
-            $payments = $order->payments()->where('payment_method','cash_on_delivery')->exists();
-            $cash_in_hand = $deliveryman?->wallet?->collected_cash ?? 0;
-            $dm_max_cash=BusinessSetting::where('key','dm_max_cash_in_hand')->first();
-            $value=  $dm_max_cash?->value ?? 0;
+        // Check maximum orders limit
+        if ($deliveryman->current_orders >= config('dm_maximum_orders')) {
+            DB::rollBack();
+            return response()->json(['message'=> translate('messages.dm_maximum_order_exceed_warning')], 400);
+        }
 
-            if(($order->payment_method == "cash_on_delivery" || $payments) && (($cash_in_hand+$order->order_amount) >= $value)){
-                return response()->json(['message'=> \App\CentralLogics\Helpers::format_currency($value) ." ".translate('max_cash_in_hand_exceeds')  ], 400);
-            }
+        // Check cash in hand limit
+        $payments = $order->payments()->where('payment_method','cash_on_delivery')->exists();
+        $cash_in_hand = $deliveryman?->wallet?->collected_cash ?? 0;
+        $dm_max_cash = BusinessSetting::where('key','dm_max_cash_in_hand')->first();
+        $max_cash_value = $dm_max_cash?->value ?? 0;
 
-            if ($order->delivery_man) {
-                $dm = $order->delivery_man;
-                $dm->current_orders = $dm->current_orders > 1 ? $dm->current_orders - 1 : 0;
-                $dm->save();
-                if (Helpers::getNotificationStatusData('deliveryman','deliveryman_order_assign_unassign','push_notification_status')) {
+        if (($order->payment_method == "cash_on_delivery" || $payments) && 
+            (($cash_in_hand + $order->order_amount) >= $max_cash_value)) {
+            DB::rollBack();
+            return response()->json([
+                'message'=> \App\CentralLogics\Helpers::format_currency($max_cash_value) . " " . translate('max_cash_in_hand_exceeds')
+            ], 400);
+        }
+
+        // Unassign previous delivery man if exists
+        $previous_dm_id = $order->delivery_man_id;
+        if ($previous_dm_id) {
+            // Use atomic decrement to prevent race conditions
+            DeliveryMan::where('id', $previous_dm_id)
+                ->where('current_orders', '>', 0)
+                ->decrement('current_orders');
+            
+            // Send unassignment notification
+            $previous_dm = DeliveryMan::find($previous_dm_id);
+            if ($previous_dm && Helpers::getNotificationStatusData('deliveryman','deliveryman_order_assign_unassign','push_notification_status')) {
+                try {
                     $data = [
                         'title' => translate('Order_Notification'),
                         'description' => translate('messages.you_are_unassigned_from_a_order'),
@@ -599,73 +643,100 @@ class OrderController extends Controller
                         'image' => '',
                         'type' => 'unassign'
                     ];
-                    Helpers::send_push_notif_to_device($dm->fcm_token, $data);
+                    Helpers::send_push_notif_to_device($previous_dm->fcm_token, $data);
 
                     DB::table('user_notifications')->insert([
                         'data' => json_encode($data),
-                        'delivery_man_id' => $dm->id,
+                        'delivery_man_id' => $previous_dm->id,
                         'created_at' => now(),
                         'updated_at' => now()
                     ]);
+                } catch (\Exception $e) {
+                    info('Unassignment notification failed: ' . $e->getMessage());
                 }
-
             }
-            $order->delivery_man_id = $delivery_man_id;
-            $order->order_status = in_array($order->order_status, ['pending', 'confirmed']) ? 'accepted' : $order->order_status;
-            $order->accepted = now();
-            $order->save();
-
-            $deliveryman->current_orders = $deliveryman->current_orders + 1;
-            $deliveryman->save();
-            $deliveryman->increment('assigned_order_count');
-
-            $fcm_token= $order->is_guest == 0 ? $order?->customer?->cm_firebase_token : $order?->guest?->fcm_token;
-            $value = Helpers::order_status_update_message('accepted',$order->module->module_type,$order->customer?
-            $order?->customer?->current_language_key:'en');
-            $value = Helpers::text_variable_data_format(value:$value,store_name:$order->store?->name,order_id:$order->id,user_name:"{$order?->customer?->f_name} {$order?->customer?->l_name}",delivery_man_name:"{$order->delivery_man?->f_name} {$order->delivery_man?->l_name}");
-            try {
-                if ($value  && Helpers::getNotificationStatusData('customer','customer_order_notification','push_notification_status') && $fcm_token ) {
-                    $data = [
-                        'title' => translate('Order_Notification'),
-                        'description' => $value,
-                        'order_id' => $order['id'],
-                        'image' => '',
-                        'type' => 'order_status'
-                    ];
-                        Helpers::send_push_notif_to_device($fcm_token, $data);
-                        DB::table('user_notifications')->insert([
-                            'data' => json_encode($data),
-                            'user_id' => $order?->customer?->id ,
-                            'created_at' => now(),
-                            'updated_at' => now()
-                        ]);
-                }
-
-                if(Helpers::getNotificationStatusData('deliveryman','deliveryman_order_assign_unassign','push_notification_status')){
-                    $data = [
-                        'title' => translate('Order_Notification'),
-                        'description' => translate('messages.you_are_assigned_to_a_order'),
-                        'order_id' => $order['id'],
-                        'image' => '',
-                        'type' => 'order_status'
-                    ];
-                    Helpers::send_push_notif_to_device($deliveryman->fcm_token, $data);
-                    DB::table('user_notifications')->insert([
-                        'data' => json_encode($data),
-                        'delivery_man_id' => $deliveryman->id,
-                        'created_at' => now(),
-                        'updated_at' => now()
-                    ]);
-                }
-
-            } catch (\Exception $e) {
-                info($e->getMessage());
-                Toastr::warning(translate('messages.push_notification_faild'));
-            }
-            return response()->json([], 200);
         }
-        return response()->json(['message' => 'Deliveryman not available!'], 400);
+
+        // Assign new delivery man
+        $order->delivery_man_id = $delivery_man_id;
+        $order->order_status = in_array($order->order_status, ['pending', 'confirmed']) ? 'accepted' : $order->order_status;
+        $order->accepted = now();
+        $order->save();
+
+        // Use atomic increment to prevent race conditions
+        $deliveryman->increment('current_orders');
+        $deliveryman->increment('assigned_order_count');
+
+        DB::commit();
+
+        // Send notifications (after commit to ensure data consistency)
+        try {
+            $fcm_token = $order->is_guest == 0 ? $order?->customer?->cm_firebase_token : $order?->guest?->fcm_token;
+            $notification_value = Helpers::order_status_update_message(
+                'accepted',
+                $order->module->module_type,
+                $order->customer ? $order->customer->current_language_key : 'en'
+            );
+            $notification_value = Helpers::text_variable_data_format(
+                value: $notification_value,
+                store_name: $order->store?->name,
+                order_id: $order->id,
+                user_name: "{$order?->customer?->f_name} {$order?->customer?->l_name}",
+                delivery_man_name: "{$deliveryman->f_name} {$deliveryman->l_name}"
+            );
+
+            // Send customer notification
+            if ($notification_value && Helpers::getNotificationStatusData('customer','customer_order_notification','push_notification_status') && $fcm_token) {
+                $data = [
+                    'title' => translate('Order_Notification'),
+                    'description' => $notification_value,
+                    'order_id' => $order->id,
+                    'image' => '',
+                    'type' => 'order_status'
+                ];
+                Helpers::send_push_notif_to_device($fcm_token, $data);
+                
+                if ($order->is_guest == 0 && $order->customer) {
+                    DB::table('user_notifications')->insert([
+                        'data' => json_encode($data),
+                        'user_id' => $order->customer->id,
+                        'created_at' => now(),
+                        'updated_at' => now()
+                    ]);
+                }
+            }
+
+            // Send delivery man notification
+            if (Helpers::getNotificationStatusData('deliveryman','deliveryman_order_assign_unassign','push_notification_status')) {
+                $data = [
+                    'title' => translate('Order_Notification'),
+                    'description' => translate('messages.you_are_assigned_to_a_order'),
+                    'order_id' => $order->id,
+                    'image' => '',
+                    'type' => 'order_status'
+                ];
+                Helpers::send_push_notif_to_device($deliveryman->fcm_token, $data);
+                
+                DB::table('user_notifications')->insert([
+                    'data' => json_encode($data),
+                    'delivery_man_id' => $deliveryman->id,
+                    'created_at' => now(),
+                    'updated_at' => now()
+                ]);
+            }
+        } catch (\Exception $e) {
+            info('Notification failed in add_delivery_man: ' . $e->getMessage());
+            // Don't fail the request if notifications fail
+        }
+
+        return response()->json(['message' => translate('messages.delivery_man_assigned_successfully')], 200);
+
+    } catch (\Exception $e) {
+        DB::rollBack();
+        info('Error in add_delivery_man: ' . $e->getMessage());
+        return response()->json(['message' => translate('messages.something_went_wrong')], 500);
     }
+}
 
     public function update_shipping(Request $request, Order $order)
     {
@@ -1211,6 +1282,12 @@ class OrderController extends Controller
         $free_delivery_over = BusinessSetting::where('key', 'free_delivery_over')->first()->value;
         if (isset($free_delivery_over)) {
             if ($free_delivery_over <= $product_price + $total_addon_price - $coupon_discount_amount - $store_discount_amount) {
+                $order->delivery_charge = 0;
+            }
+        }
+
+        if ($store->store_free_delivery && isset($store->store_free_delivery_over)) {
+            if ($store->store_free_delivery_over <= $product_price + $total_addon_price - $coupon_discount_amount - $store_discount_amount) {
                 $order->delivery_charge = 0;
             }
         }

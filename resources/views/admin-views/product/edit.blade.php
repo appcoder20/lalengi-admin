@@ -22,23 +22,6 @@
                     {{ request()->product_gellary  == 1 ?  translate('Add_item') : translate('item_update') }}
                 </span>
             </h1>
-            <div class="d-flex align-items-end flex-wrap">
-                @if(Config::get('module.current_module_type') == 'food')
-                <div class="text--primary-2 py-1 d-flex flex-wrap align-items-center foodModalShow" type="button" >
-                    <strong class="mr-2">{{translate('See_how_it_works!')}}</strong>
-                    <div>
-                        <i class="tio-info-outined"></i>
-                    </div>
-                </div>
-                @else
-                <div class="text--primary-2 py-1 d-flex flex-wrap align-items-center attributeModalShow" type="button" >
-                    <strong class="mr-2">{{translate('See_how_it_works!')}}</strong>
-                    <div>
-                        <i class="tio-info-outined"></i>
-                    </div>
-                </div>
-                @endif
-            </div>
         </div>
         <!-- End Page Header -->
         <form action="javascript:" method="post" id="product_form" enctype="multipart/form-data">

@@ -26,22 +26,6 @@
                         <span>{{translate('Add Info From Gallery')}}</span>
                     </a>
                 </div>
-
-                @if(Config::get('module.current_module_type') == 'food')
-                <div class="text--primary-2 py-1 d-flex flex-wrap align-items-center foodModalShow"  type="button" >
-                    <strong class="mr-2">{{translate('See_how_it_works!')}}</strong>
-                    <div>
-                        <i class="tio-info-outined"></i>
-                    </div>
-                </div>
-                @else
-                <div class="text--primary-2 py-1 d-flex flex-wrap align-items-center mb-3 attributeModalShow" type="button" >
-                    <strong class="mr-2">{{translate('See_how_it_works!')}}</strong>
-                    <div>
-                        <i class="tio-info-outined"></i>
-                    </div>
-                </div>
-                @endif
             </div>
         </div>
         <!-- End Page Header -->

@@ -907,6 +907,13 @@ class OrderController extends Controller
                 }
             }
 
+            if ($store->store_free_delivery && isset($store->store_free_delivery_over)) {
+                if ($store->store_free_delivery_over <= $product_price + $total_addon_price - $coupon_discount_amount - $store_discount_amount) {
+                    $order->delivery_charge = 0;
+                    $free_delivery_by = 'admin';
+                }
+            }
+
             if ($store->free_delivery) {
                 $order->delivery_charge = 0;
                 $free_delivery_by = 'vendor';

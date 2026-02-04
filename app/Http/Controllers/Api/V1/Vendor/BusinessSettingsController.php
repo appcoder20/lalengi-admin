@@ -82,6 +82,7 @@ class BusinessSettingsController extends Controller
         $store->non_veg = $request?->non_veg ?? 0;
         $store->cutlery = $request->cutlery??0;
         $store->free_delivery = $request->free_delivery??0;
+        $store->store_free_delivery = $request->store_free_delivery??0;
         $store->minimum_order = $request->minimum_order;
         $store->gst = json_encode(['status'=>$request->gst_status, 'code'=>$request->gst]);
         // $store->delivery_charge = $store->sub_self_delivery?$request->delivery_charge: $store->delivery_charge;
